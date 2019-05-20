@@ -1,11 +1,8 @@
 from __future__ import print_function
 import numpy as np
-import theano
-import theano.tensor as T
 from collections import defaultdict
-import cPickle
 import os
-
+import torch
 
 class DataHelper:
     def __init__(self,
@@ -20,15 +17,15 @@ class DataHelper:
 
         """
         Class to load and organize alignment data.
-        This function also helps makes predictions about mutations.
+        This function is also used for mutation effect predictions.
 
         Parameters
         --------------
         dataset: preloaded dataset names
                     We have found it easiest to organize datasets in this
-                    way and use the self.configure_datasets() func
+                    way and use the self.configure_data sets() func
         alignment_file: Name of the alignment file located in the "datasets"
-                            folder. Not needed if dataset pre-entered
+                            folder. Not needed if data set pre-entered
         focus_seq_name: Name of the sequence in the alignment
                             Defaults to the first sequence in the alignment
         calc_weights: (bool) Calculate sequence weights
@@ -47,7 +44,6 @@ class DataHelper:
         ------------
         None
         """
-
         np.random.seed(42)
         self.dataset = dataset
         self.alignment_file = alignment_file
@@ -56,18 +52,16 @@ class DataHelper:
         self.calc_weights = calc_weights
         self.alphabet_type = alphabet_type
 
-        # Initalize the elbo of the wt to None
-        #   will be useful if eventually doing mutation effect prediction
+        # Initalize the elbo of the wt to None for mutation effect prediction
         self.wt_elbo = None
 
         # Alignment processing parameters
         self.theta = theta
 
-        # If I am running tests with the model, I don't need all the
-        #    sequences loaded
+        # Determines whether to load all sequences (for training) or not (for testing)
         self.load_all_sequences = load_all_sequences
 
-        # Load necessary information for preloaded datasets
+        # Load from preloaded datasets
         if self.dataset != "":
             self.configure_datasets()
 
@@ -92,27 +86,27 @@ class DataHelper:
             self.gen_full_alignment()
 
     def configure_datasets(self):
-
+        """function to facilitate easy loading of pre-aligned data sets
+        to download these, run the download_alignments.sh script in terminal."""
         if self.dataset == "BLAT_ECOLX":
-            self.alignment_file = self.working_dir+"/datasets/BLAT_ECOLX_hmmerbit_plmc_n5_m30_f50_t0.2_r24-286_id100_b105.a2m"
+            self.alignment_file = self.working_dir + "/alignments/BLAT_ECOLX_hmmerbit_plmc_n5_m30_f50_t0.2_r24-286_id100_b105.a2m"
             self.theta = 0.2
 
         elif self.dataset == "PABP_YEAST":
-            self.alignment_file = self.working_dir+"/datasets/PABP_YEAST_hmmerbit_plmc_n5_m30_f50_t0.2_r115-210_id100_b48.a2m"
+            self.alignment_file = self.working_dir + "/alignments/PABP_YEAST_hmmerbit_plmc_n5_m30_f50_t0.2_r115-210_id100_b48.a2m"
             self.theta = 0.2
 
         elif self.dataset == "DLG4_RAT":
-            self.alignment_file = self.working_dir+"/datasets/DLG4_RAT_hmmerbit_plmc_n5_m30_f50_t0.2_r300-400_id100_b50.a2m"
+            self.alignment_file = self.working_dir + "/alignment/DLG4_RAT_hmmerbit_plmc_n5_m30_f50_t0.2_r300-400_id100_b50.a2m"
             self.theta = 0.2
 
         elif self.dataset == "trna":
-            self.alignment_file = self.working_dir+"/datasets/RF00005_CCU.fasta"
+            self.alignment_file = self.working_dir + "/alignments/RF00005_CCU.fasta"
             self.alphabet_type = "RNA"
             self.theta = 0.2
 
-
     def one_hot_3D(self, s):
-        """ Transform sequence string into one-hot aa vector"""
+        """ Transforms sequence string into one-hot amino acid vector"""
         # One-hot encode as row vector
         x = np.zeros((len(s), len(self.alphabet)))
         for i, letter in enumerate(s):
@@ -121,7 +115,7 @@ class DataHelper:
         return x
 
     def gen_basic_alignment(self):
-        """ Read training alignment and store basics in class instance """
+        """ Read training alignment and store basics in class instance"""
         # Make a dictionary that goes from aa to a number for one-hot
         self.aa_dict = {}
         for i,aa in enumerate(self.alphabet):
@@ -147,8 +141,7 @@ class DataHelper:
                 self.seq_name_to_sequence[name] += line
         INPUT.close()
 
-        # If we don"t have a focus sequence, pick the one that
-        #   we used to generate the alignment
+        # If we don"t have a focus sequence, pick the one that we used to generate the alignment
         if self.focus_seq_name == "":
             self.focus_seq_name = self.seq_names[0]
 
@@ -173,9 +166,8 @@ class DataHelper:
         self.uniprot_focus_col_to_focus_idx \
             = {idx_col+int(start):idx_col for idx_col in self.focus_cols}
 
-
     def gen_full_alignment(self):
-
+        """Generate the full sequence alignment data-set for training, storing this in the class"""
         # Get only the focus columns
         for seq_name,sequence in self.seq_name_to_sequence.items():
             # Replace periods with dashes (the uppercase equivalent)
@@ -197,7 +189,7 @@ class DataHelper:
             del self.seq_name_to_sequence[seq_name]
 
         # Encode the sequences
-        print ("Encoding sequences")
+        print("Encoding sequences")
         self.x_train = np.zeros((len(self.seq_name_to_sequence.keys()),len(self.focus_cols),len(self.alphabet)))
         self.x_train_name_list = []
         for i,seq_name in enumerate(self.seq_name_to_sequence.keys()):
@@ -208,23 +200,15 @@ class DataHelper:
                     k = self.aa_dict[letter]
                     self.x_train[i,j,k] = 1.0
 
-
-        # Fast sequence weights with Theano
+        # sequence weights with numpy
         if self.calc_weights:
-            print ("Computing sequence weights")
-            # Numpy version
-            # import scipy
-            # from scipy.spatial.distance import pdist, squareform
-            # self.weights = scale / np.sum(squareform(pdist(seq_index_array, metric="hamming")) < theta, axis=0)
-            #
-            # Theano weights
-            X = T.tensor3("x")
-            cutoff = T.scalar("theta")
-            X_flat = X.reshape((X.shape[0], X.shape[1]*X.shape[2]))
-            N_list, updates = theano.map(lambda x: 1.0 / T.sum(T.dot(X_flat, x) / T.dot(x, x) > 1 - cutoff), X_flat)
-            weightfun = theano.function(inputs=[X, cutoff], outputs=[N_list],allow_input_downcast=True)
-            #
-            self.weights = weightfun(self.x_train, self.theta)[0]
+            print("Computing sequence weights")
+            X = self.x_train
+            cutoff = self.theta
+            X_flat = X.reshape((X.shape[0], X.shape[1] * X.shape[2]))
+            weightfun = lambda x: 1.0 / np.sum(np.dot(X_flat,x) / np.dot(x,x) > 1 - cutoff)
+            N_list = np.array(list(map(weightfun,X_flat)))
+            self.weights = (N_list)
 
         else:
             # If not using weights, use an isotropic weight matrix
@@ -232,22 +216,20 @@ class DataHelper:
 
         self.Neff = np.sum(self.weights)
 
-        print ("Neff =",str(self.Neff))
-        print ("Data Shape =",self.x_train.shape)
+        print("Neff =",str(self.Neff))
+        print("Data Shape =",self.x_train.shape)
 
 
     def delta_elbo(self, model, mutant_tuple_list, N_pred_iterations=10):
-
+        """ calculates the delta ELBO for a mutant sequence"""
         for pos,wt_aa,mut_aa in mutant_tuple_list:
-            if pos not in self.uniprot_focus_col_to_wt_aa_dict \
-                or self.uniprot_focus_col_to_wt_aa_dict[pos] != wt_aa:
-                print ("Not a valid mutant!",pos,wt_aa,mut_aa)
+            if pos not in self.uniprot_focus_col_to_wt_aa_dict or self.uniprot_focus_col_to_wt_aa_dict[pos] != wt_aa:
+                print("Not a valid mutant!",pos,wt_aa,mut_aa)
                 return None
 
         mut_seq = self.focus_seq_trimmed[:]
         for pos,wt_aa,mut_aa in mutant_tuple_list:
             mut_seq[self.uniprot_focus_col_to_focus_idx[pos]] = mut_aa
-
 
         if self.wt_elbo == None:
             mutant_sequences = [self.focus_seq_trimmed, mut_seq]
@@ -266,7 +248,7 @@ class DataHelper:
         prediction_matrix = np.zeros((mutant_sequences_one_hot.shape[0],N_pred_iterations))
         idx_batch = np.arange(mutant_sequences_one_hot.shape[0])
         for i in range(N_pred_iterations):
-
+            model_input = torch.tensor(mutant_sequences_one_hot, device=model.device, dtype=model.dtype)
             batch_preds, _, _ = model.all_likelihood_components(mutant_sequences_one_hot)
 
             prediction_matrix[:,i] = batch_preds
@@ -333,7 +315,9 @@ class DataHelper:
             for j in range(0,self.mutant_sequences_one_hot.shape[0],minibatch_size):
 
                 batch_index = batch_order[j:j+minibatch_size]
-                batch_preds, _, _ = model.all_likelihood_components(self.mutant_sequences_one_hot[batch_index])
+                model_input = torch.tensor(self.mutant_sequences_one_hot[batch_index],
+                                           device=model.device, dtype=model.dtype)
+                batch_preds, _, _ = model.all_likelihood_components(model_input)
 
                 for k,idx_batch in enumerate(batch_index.tolist()):
                     self.prediction_matrix[idx_batch][i]= batch_preds[k]
@@ -362,7 +346,7 @@ class DataHelper:
     def custom_mutant_matrix(self, input_filename, model, N_pred_iterations=10, \
             minibatch_size=2000, filename_prefix="", offset=0):
 
-        """ Predict the delta elbo for a custom mutation filename
+        """ Predict the delta ELBO for a custom mutation filename
         """
         # Get the start and end index from the sequence name
         start_idx, end_idx = self.focus_seq_name.split("/")[-1].split("-")
@@ -435,7 +419,9 @@ class DataHelper:
             for j in range(0,self.mutant_sequences_one_hot.shape[0],minibatch_size):
 
                 batch_index = batch_order[j:j+minibatch_size]
-                batch_preds, _, _ = model.all_likelihood_components(self.mutant_sequences_one_hot[batch_index])
+                model_input = torch.tensor(self.mutant_sequences_one_hot[batch_index],
+                                           device=model.device, dtype=model.dtype)
+                batch_preds, _, _ = model.all_likelihood_components(model_input)
 
                 for k,idx_batch in enumerate(batch_index.tolist()):
                     self.prediction_matrix[idx_batch][i]= batch_preds[k]
@@ -463,7 +449,7 @@ class DataHelper:
 
     def get_pattern_activations(self, model, update_num, filename_prefix="",
                         verbose=False, minibatch_size=2000):
-
+        """returns the decoder outputs"""
         activations_filename = self.working_dir+"/embeddings/"+filename_prefix+"_pattern_activations.csv"
 
         OUTPUT = open(activations_filename, "w")
@@ -480,11 +466,10 @@ class DataHelper:
                 sample_name = self.x_train_name_list[idx]
                 out_line = [str(update_num),sample_name]+sample_activation
                 if verbose:
-                    print ("\t".join(out_line))
+                    print("\t".join(out_line))
                 OUTPUT.write(",".join(out_line)+"\n")
 
         OUTPUT.close()
-
 
     def get_embeddings(self, model, update_num, filename_prefix="",
                         verbose=False, minibatch_size=2000):
@@ -509,8 +494,8 @@ class DataHelper:
 
         for i in range(0,len(self.x_train_name_list),minibatch_size):
             batch_index = batch_order[i:i+minibatch_size]
-            one_hot_seqs = self.x_train[batch_index]
-            batch_mu, batch_log_sigma  = model.recognize(one_hot_seqs)
+            one_hot_seqs = torch.tensor(self.x_train[batch_index],device=model.device, dtype=model.dtype)
+            batch_mu, batch_log_sigma = model.recognize(one_hot_seqs)
 
             for j,idx in enumerate(batch_index.tolist()):
                 sample_mu = [str(val) for val in batch_mu[j].tolist()]
@@ -518,7 +503,7 @@ class DataHelper:
                 sample_name = self.x_train_name_list[idx]
                 out_line = [str(update_num),sample_name]+sample_mu+sample_log_sigma
                 if verbose:
-                    print ("\t".join(out_line))
+                    print("\t".join(out_line))
                 OUTPUT.write(",".join(out_line)+"\n")
 
         OUTPUT.close()
@@ -535,10 +520,36 @@ class DataHelper:
             for j in range(0,self.one_hot_mut_array_with_wt.shape[0],minibatch_size):
 
                 batch_index = batch_order[j:j+minibatch_size]
-                batch_preds, _, _ = model.all_likelihood_components(self.one_hot_mut_array_with_wt[batch_index])
+                model_input = torch.tensor(self.one_hot_mut_array_with_wt[batch_index],
+                                           device=model.device,dtype=model.device)
+                batch_preds, _, _ = model.all_likelihood_components(model_input)
 
                 for k,idx_batch in enumerate(batch_index.tolist()):
                     self.prediction_matrix[idx_batch][i]= batch_preds[k]
+
+def gen_simple_job_string(model, data_params, unique_id):
+    """
+    For testing and debugging purposes, this makes a simple job string of key model params
+    (convolution, sparsity, temperature)
+    :param model: model in question
+    :param data_params: data set information
+    :param unique_id: additional user-defined id to add to job string
+    :return: the job string
+    """
+    job_string = data_params['dataset']
+    job_string += "_pytorch_"
+    job_string += model.type
+    if model.sparsity:
+        job_string += "_SPARSE"
+    if model.convolve_patterns:
+        job_string += "_CONVPAT"
+    if model.final_pwm_scale:
+        job_string += "_PWM"
+    if model.convolve_encoder:
+        job_string += "_CONVENC"
+    job_string += unique_id
+    return job_string
+
 
 def gen_job_string(data_params, model_params):
     """
